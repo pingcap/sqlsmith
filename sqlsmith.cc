@@ -59,12 +59,18 @@ extern "C" void cerr_log_handler(int)
   exit(1);
 }
 
+bool starts_with(const std::string& s, const std::string& prefix) {
+   auto size = prefix.size();
+   if (s.size() < size) return false;
+   return std::equal(std::begin(prefix), std::end(prefix), std::begin(s));
+}
+
 int main(int argc, char *argv[])
 {
   cerr << PACKAGE_NAME " " GITREV << endl;
 
   map<string,string> options;
-  regex optregex("--(help|log-to|verbose|target|sqlite|monetdb|mysql|version|dump-all-graphs|dump-all-queries|seed|dry-run|max-queries|rng-state|exclude-catalog)(?:=((?:.|\n)*))?");
+  regex optregex("--(help|log-to|verbose|target|sqlite|monetdb|mysql|version|dump-all-graphs|dump-all-queries|seed|dry-run|max-queries|rng-state|exclude-catalog|abtest)(?:=((?:.|\n)*))?");
   
   for(char **opt = argv+1 ;opt < argv+argc; opt++) {
     smatch match;
@@ -86,7 +92,7 @@ int main(int argc, char *argv[])
 #ifdef HAVE_MONETDB
       "    --monetdb=connstr    MonetDB database to send queries to" <<endl <<
 #endif
-      "    --mysql=URI    		MySQL database to send queries to" <<endl <<
+      "    --mysql=URI        MySQL database to send queries to" <<endl <<
       "    --log-to=connstr     log errors to postgres database" << endl <<
       "    --seed=int           seed RNG with specified int instead of PID" << endl <<
       "    --dump-all-queries   print queries as they are generated" << endl <<
@@ -94,7 +100,8 @@ int main(int argc, char *argv[])
       "    --dry-run            print queries instead of executing them" << endl <<
       "    --exclude-catalog    don't generate queries using catalog relations" << endl <<
       "    --max-queries=long   terminate after generating this many queries" << endl <<
-      "    --rng-state=string    deserialize dumped rng state" << endl <<
+      "    --rng-state=string   deserialize dumped rng state" << endl <<
+      "    --abtest             enable abtest with some database protocol" << endl <<
       "    --verbose            emit progress output" << endl <<
       "    --version            print version information and exit" << endl <<
       "    --help               print available command line options and exit" << endl;
@@ -105,37 +112,58 @@ int main(int argc, char *argv[])
 
   try
     {
-      shared_ptr<schema> schema;
+      string target, abtest_target;
+      shared_ptr<schema> sch;
       if (options.count("sqlite")) {
+        target = "sqlite";
 #ifdef HAVE_LIBSQLITE3
-	schema = make_shared<schema_sqlite>(options["sqlite"], options.count("exclude-catalog"));
+        sch = make_shared<schema_sqlite>(options["sqlite"], options.count("exclude-catalog"));
 #else
-	cerr << "Sorry, " PACKAGE_NAME " was compiled without SQLite support." << endl;
-	return 1;
+        cerr << "Sorry, " PACKAGE_NAME " was compiled without SQLite support." << endl;
+        return 1;
 #endif
       }
       else if(options.count("monetdb")) {
+        target = "monetdb";
 #ifdef HAVE_MONETDB
-	schema = make_shared<schema_monetdb>(options["monetdb"]);
+        sch = make_shared<schema_monetdb>(options["monetdb"]);
 #else
-	cerr << "Sorry, " PACKAGE_NAME " was compiled without MonetDB support." << endl;
-	return 1;
+        cerr << "Sorry, " PACKAGE_NAME " was compiled without MonetDB support." << endl;
+        return 1;
 #endif
-			}
-	  	else if(options.count("mysql")) {
-	schema = make_shared<schema_mysql>(options["mysql"], options.count("exclude-catalog"));
       }
-      else
-	schema = make_shared<schema_pqxx>(options["target"], options.count("exclude-catalog"));
+      else if(options.count("mysql")) {
+        target = "mysql";
+        sch = make_shared<schema_mysql>(options["mysql"], options.count("exclude-catalog"));
+      } else {
+        sch = make_shared<schema_pqxx>(options["target"], options.count("exclude-catalog"));
+      }
 
       scope scope;
       long queries_generated = 0;
-      schema->fill_scope(scope);
+      sch->fill_scope(scope);
+
+      // handle abtest options
+      // if (options.count("abtest")) {
+      //   if (options["abtest"] == "pgsql") {
+      //     string conn = "host=172.16.4.253 port=5432 dbname=sakila user=postgres";
+      //     abtest_target = "pgsql";
+      //     shared_ptr<schema> abtest_sch;
+      //     abtest_sch = make_shared<schema_pqxx>(conn, false);
+      //     abtest_sch->fill_scope(abtest_scope);
+      //   } else if (options["abtest"] == "mysql") {
+      //     string conn = "";
+      //     abtest_target = "mysql";
+      //     shared_ptr<schema> abtest_sch;
+      //     abtest_sch = make_shared<schema_mysql>(conn, false);
+      //     abtest_sch->fill_scope(abtest_scope);
+      //   }
+      // }
 
       if (options.count("rng-state")) {
-	   istringstream(options["rng-state"]) >> smith::rng;
+         istringstream(options["rng-state"]) >> smith::rng;
       } else {
-	   smith::rng.seed(options.count("seed") ? stoi(options["seed"]) : getpid());
+         smith::rng.seed(options.count("seed") ? stoi(options["seed"]) : getpid());
       }
 
       vector<shared_ptr<logger> > loggers;
@@ -143,112 +171,123 @@ int main(int argc, char *argv[])
       loggers.push_back(make_shared<impedance_feedback>());
 
       if (options.count("log-to"))
-	loggers.push_back(make_shared<pqxx_logger>(
-	     options.count("sqlite") ? options["sqlite"] : options["target"],
-	     options["log-to"], *schema));
+        loggers.push_back(make_shared<pqxx_logger>(
+				options.count("sqlite") ? options["sqlite"] : options["target"],
+				options["log-to"], *sch));
 
       if (options.count("verbose")) {
-	auto l = make_shared<cerr_logger>();
-	global_cerr_logger = &*l;
-	loggers.push_back(l);
-	signal(SIGINT, cerr_log_handler);
+        auto l = make_shared<cerr_logger>();
+        global_cerr_logger = &*l;
+        loggers.push_back(l);
+        signal(SIGINT, cerr_log_handler);
       }
       
       if (options.count("dump-all-graphs"))
-	loggers.push_back(make_shared<ast_logger>());
+        loggers.push_back(make_shared<ast_logger>());
 
       if (options.count("dump-all-queries"))
-	loggers.push_back(make_shared<query_dumper>());
+        loggers.push_back(make_shared<query_dumper>());
 
       if (options.count("dry-run")) {
-	while (1) {
-	  shared_ptr<prod> gen = statement_factory(&scope);
-	  gen->out(cout);
-	  for (auto l : loggers)
-	    l->generated(*gen);
-	  cout << ";" << endl;
-	  queries_generated++;
+        while (1) {
+          cout << "generate main" << endl;
+          shared_ptr<prod> gen = statement_factory(&scope);
+          cout << target << endl;
+          gen->out(cout);
+          // if (options.count("abtest")) {
+          //   cout << "generate sub" << endl;
+          //   // schema *tmp_schema = scope.schema;
+          //   // scope.schema = scope.abtest_schema;
+          //   cout << endl << abtest_target << endl;
+          //   gen->out(cout);
+          //   // scope.schema = tmp_schema;
+          //   exit(0);
+          // }
+          for (auto l : loggers)
+            l->generated(*gen);
+          cout << ";" << endl;
+          queries_generated++;
 
-	  if (options.count("max-queries")
-	      && (queries_generated >= stol(options["max-queries"])))
-	      return 0;
-	}
+          if (options.count("max-queries")
+            && (queries_generated >= stol(options["max-queries"])))
+            return 0;
+        }
       }
 
       shared_ptr<dut_base> dut;
       
       if (options.count("sqlite")) {
 #ifdef HAVE_LIBSQLITE3
-	dut = make_shared<dut_sqlite>(options["sqlite"]);
+        dut = make_shared<dut_sqlite>(options["sqlite"]);
 #else
-	cerr << "Sorry, " PACKAGE_NAME " was compiled without SQLite support." << endl;
-	return 1;
+        cerr << "Sorry, " PACKAGE_NAME " was compiled without SQLite support." << endl;
+        return 1;
 #endif
       }
       else if(options.count("monetdb")) {
-#ifdef HAVE_MONETDB	   
-	dut = make_shared<dut_monetdb>(options["monetdb"]);
+#ifdef HAVE_MONETDB     
+        dut = make_shared<dut_monetdb>(options["monetdb"]);
 #else
-	cerr << "Sorry, " PACKAGE_NAME " was compiled without MonetDB support." << endl;
-	return 1;
+        cerr << "Sorry, " PACKAGE_NAME " was compiled without MonetDB support." << endl;
+        return 1;
 #endif
-			}
+      }
       else if(options.count("mysql")) {
-	dut = make_shared<dut_mysql>(options["mysql"]);
+        dut = make_shared<dut_mysql>(options["mysql"]);
       }
       else
-	dut = make_shared<dut_libpq>(options["target"]);
+        dut = make_shared<dut_libpq>(options["target"]);
 
       while (1) /* Loop to recover connection loss */
       {
-	try {
-            while (1) { /* Main loop */
+        try {
+          while (1) { /* Main loop */
 
-	    if (options.count("max-queries")
-		&& (++queries_generated > stol(options["max-queries"]))) {
-	      if (global_cerr_logger)
-		global_cerr_logger->report();
-	      return 0;
-	    }
-	    
-	    /* Invoke top-level production to generate AST */
-	    shared_ptr<prod> gen = statement_factory(&scope);
+            if (options.count("max-queries")
+              && (++queries_generated > stol(options["max-queries"]))) {
+              if (global_cerr_logger)
+                global_cerr_logger->report();
+                return 0;
+            }
 
-	    for (auto l : loggers)
-	      l->generated(*gen);
-	  
-	    /* Generate SQL from AST */
-	    ostringstream s;
-	    gen->out(s);
+            /* Invoke top-level production to generate AST */
+            shared_ptr<prod> gen = statement_factory(&scope);
 
-	    /* Try to execute it */
-	    try {
-	      dut->test(s.str());
-	      for (auto l : loggers)
-		l->executed(*gen);
-	    } catch (const dut::failure &e) {
-	      for (auto l : loggers)
-		try {
-		  l->error(*gen, e);
-		} catch (runtime_error &e) {
-		  cerr << endl << "log failed: " << typeid(*l).name() << ": "
-		       << e.what() << endl;
-		}
-	      if ((dynamic_cast<const dut::broken *>(&e))) {
-		/* re-throw to outer loop to recover session. */
-		throw;
-	      }
-	    }
-	  }
-	}
-	catch (const dut::broken &e) {
-	  /* Give server some time to recover. */
-	  this_thread::sleep_for(milliseconds(1000));
-	}
+            for (auto l : loggers)
+              l->generated(*gen);
+      
+            /* Generate SQL from AST */
+            ostringstream s;
+            gen->out(s);
+
+            /* Try to execute it */
+            try {
+              dut->test(s.str());
+              for (auto l : loggers)
+              l->executed(*gen);
+            } catch (const dut::failure &e) {
+              for (auto l : loggers)
+                try {
+                  l->error(*gen, e);
+                } catch (runtime_error &e) {
+                  cerr << endl << "log failed: " << typeid(*l).name() << ": "
+                      << e.what() << endl;
+                }
+              if ((dynamic_cast<const dut::broken *>(&e))) {
+                /* re-throw to outer loop to recover session. */
+                throw;
+              }
+            }
+          }
+        }
+        catch (const dut::broken &e) {
+          /* Give server some time to recover. */
+          this_thread::sleep_for(milliseconds(1000));
+        }
       }
     }
-  catch (const exception &e) {
-    cerr << e.what() << endl;
-    return 1;
+    catch (const exception &e) {
+      cerr << e.what() << endl;
+      return 1;
   }
 }

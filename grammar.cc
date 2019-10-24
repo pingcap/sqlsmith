@@ -20,10 +20,12 @@ shared_ptr<table_ref> table_ref::factory(prod *p) {
       if (d6() > 3)
 	return make_shared<joined_table>(p);
     }
-    if (d6() > 3)
-      return make_shared<table_or_query_name>(p);
-    else
-      return make_shared<table_sample>(p);
+    // disable table sample since both TiDB and CRDB don't support it
+    return make_shared<table_or_query_name>(p);
+    // if (d6() > 3)
+    //   return make_shared<table_or_query_name>(p);
+    // else
+    //   return make_shared<table_sample>(p);
   } catch (runtime_error &e) {
     p->retry();
   }
@@ -319,7 +321,7 @@ query_spec::query_spec(prod *p, struct scope *s, bool lateral) :
 
   if (lateral)
     scope->refs = s->refs;
-  
+
   from_clause = make_shared<struct from_clause>(this);
   select_list = make_shared<struct select_list>(this);
   
@@ -327,6 +329,7 @@ query_spec::query_spec(prod *p, struct scope *s, bool lateral) :
 
   search = bool_expr::factory(this);
 
+  // for comparing MySQL and TiDB, maybe disable limit clause here
   if (d6() > 2) {
     ostringstream cons;
     cons << "limit " << d100() + d100();
@@ -467,20 +470,20 @@ shared_ptr<prod> statement_factory(struct scope *s)
 {
   try {
     s->new_stmt();
-    if (d42() == 1)
-      return make_shared<merge_stmt>((struct prod *)0, s);
-    if (d42() == 1)
-      return make_shared<insert_stmt>((struct prod *)0, s);
-    else if (d42() == 1)
-      return make_shared<delete_returning>((struct prod *)0, s);
-    else if (d42() == 1) {
-      return make_shared<upsert_stmt>((struct prod *)0, s);
-    } else if (d42() == 1)
-      return make_shared<update_returning>((struct prod *)0, s);
-    else if (d6() > 4)
-      return make_shared<select_for_update>((struct prod *)0, s);
-    else if (d6() > 5)
-      return make_shared<common_table_expression>((struct prod *)0, s);
+    // if (d42() == 1)
+    //   return make_shared<merge_stmt>((struct prod *)0, s);
+    // if (d42() == 1)
+    //   return make_shared<insert_stmt>((struct prod *)0, s);
+    // else if (d42() == 1)
+    //   return make_shared<delete_returning>((struct prod *)0, s);
+    // else if (d42() == 1)
+    //   return make_shared<upsert_stmt>((struct prod *)0, s);
+    // else if (d42() == 1)
+    //   return make_shared<update_returning>((struct prod *)0, s);
+    // else if (d6() > 4)
+    //   return make_shared<select_for_update>((struct prod *)0, s);
+    // else if (d6() > 5)
+    //   return make_shared<common_table_expression>((struct prod *)0, s);
     return make_shared<query_spec>((struct prod *)0, s);
   } catch (runtime_error &e) {
     return statement_factory(s);
@@ -510,18 +513,17 @@ common_table_expression::common_table_expression(prod *parent, struct scope *s)
 
   } while (d6() > 2);
 
- retry:
-  do {
-    auto pick = random_pick(s->tables);
-    scope->tables.push_back(pick);
-  } while (d6() > 3);
-  try {
-    query = make_shared<query_spec>(this, scope);
-  } catch (runtime_error &e) {
-    retry();
-    goto retry;
-  }
-
+  retry:
+    do {
+      auto pick = random_pick(s->tables);
+      scope->tables.push_back(pick);
+    } while (d6() > 3);
+    try {
+      query = make_shared<query_spec>(this, scope);
+    } catch (runtime_error &e) {
+      retry();
+      goto retry;
+    }
 }
 
 void common_table_expression::out(std::ostream &out)

@@ -1,5 +1,8 @@
 #include "mysql.hh"
 #include <cstring>
+#include <regex>
+#include <iostream>
+#include <fstream>
 
 using namespace std;
 
@@ -33,6 +36,9 @@ void mysql_connection::parse_connection_string(std::string &conninfo) {
 }
 
 mysql_connection::mysql_connection(std::string &conninfo) {
+  if (conninfo == "") {
+    return;
+  }
   mysql_init(&mysql);
   parse_connection_string(conninfo);
 
@@ -87,7 +93,8 @@ std::string parse_column_type(const char* column_type) {
       !strcmp(column_type,"BLOB") ||
       !strcmp(column_type,"TINYBLOB") ||
       !strcmp(column_type,"MEDIUMBLOB") ||
-      !strcmp(column_type,"LONGBLOB")) {
+      !strcmp(column_type,"LONGBLOB") ||
+      !strcmp(column_type,"VARBINARY")) {
     return std::string("BINARY");
   }
 
@@ -107,6 +114,9 @@ std::string parse_column_type(const char* column_type) {
 schema_mysql::schema_mysql(std::string &conninfo, bool no_catalog)
   : mysql_connection(conninfo)
 {
+  if (conninfo == "") {
+    return;
+  }
   (void)no_catalog;
   MYSQL_RES *result;
   MYSQL_ROW row;
@@ -119,6 +129,7 @@ schema_mysql::schema_mysql(std::string &conninfo, bool no_catalog)
     throw std::runtime_error(mysql_error(&mysql));
   }
   result = mysql_store_result(&mysql);
+
   while ((row = mysql_fetch_row(result))) {
     string table_name;
     string schema_name;
@@ -134,6 +145,8 @@ schema_mysql::schema_mysql(std::string &conninfo, bool no_catalog)
     } else {
       continue;
     }
+
+    cout << row[0] << row[1] << insertable << base_table << endl;
 
     table tab(row[0], row[1], insertable, base_table);
     tables.push_back(tab);
@@ -267,8 +280,13 @@ dut_mysql::dut_mysql(std::string& conninfo)
 {}
 
 void dut_mysql::test(const std::string &stmt) {
+  // remove tablesample syntax which mysql don't support
+  std::string r_stmt = std::regex_replace(stmt, std::regex("tablesample.+?\n"), " \n");
+  r_stmt = std::regex_replace(r_stmt, std::regex("\n"), " ");
+  r_stmt = std::regex_replace(r_stmt, std::regex("\\s+"), " ");
+  // cout << r_stmt << endl;
 	MYSQL_RES *result;
-  int rc = mysql_real_query(&mysql, stmt.c_str(), stmt.length());
+  int rc = mysql_real_query(&mysql, r_stmt.c_str(), r_stmt.length());
   if(rc){
   	unsigned int err_num = mysql_errno(&mysql);
   	const char* err = mysql_error(&mysql);
@@ -286,6 +304,11 @@ void dut_mysql::test(const std::string &stmt) {
   	else {
 	    throw std::runtime_error(err);
   	}
+  } else {
+    ofstream sqlfile;
+    sqlfile.open("./sql/success-sql.txt", std::ios_base::app);
+    sqlfile << r_stmt << endl;
+    sqlfile.close();
   }
   result = mysql_store_result(&mysql);
   mysql_free_result(result);
